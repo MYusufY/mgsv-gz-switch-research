@@ -1,0 +1,73 @@
+#version 450
+
+// MGSV: a resolve (a 2D render target copied to memory with the Xenos 2D tiling) that the game samples as a tiled
+// 3D texture. Fox Engine blends its colour-grading LUTs into a 32x512 render target, resolves it, and the tone
+// mapping pass reads that memory as a 16x16x16 volume. The native renderer keeps resolves in host images and never
+// writes them to guest memory, so the volume is rebuilt here: for every texel of the 3D texture, its byte offset in
+// the 3D tiled layout (GetTiledOffset3D, TileDisplacement3D in sa2_native_draws.cpp) is the offset the resolve wrote
+// through the 2D tiled layout (GetTiledOffset2D); inverting the 2D tiling gives the resolve texel that holds it.
+// 32-bit texels only (the 2D inverse below is for 4-byte blocks).
+//
+// Bindings follow layout_conversion_depth_edram_ (sa2_native_targets.cpp): 0 = sampled source, 1 = storage target
+// (a 3D view here), 2 = declared for layout compatibility, never read.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0) uniform sampler2D source;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image3D target;
+layout(set = 0, binding = 2) uniform usampler2D unused;
+layout(push_constant) uniform Constants {
+  uvec4 size3;    // volume width, height, depth; its row pitch in texels (fetch pitch)
+  uvec4 source2;  // resolve row pitch in texels; resolve guest width, height; 0
+  uvec4 host2;    // resolve host image width, height (render resolution scaling); 0, 0
+} c;
+
+// TileDisplacement3D (sa2_native_draws.cpp), log2 of 4 bytes per texel.
+uint TiledOffset3D(uint x, uint y, uint z, uint pitch, uint height) {
+  const uint log2_bytes = 2u;
+  pitch = (pitch + 31u) & ~31u;
+  height = (height + 31u) & ~31u;
+  uint macro_outer = ((y >> 4u) + (z >> 2u) * (height >> 4u)) * (pitch >> 5u);
+  uint macro = ((((x >> 5u) + macro_outer) << (log2_bytes + 6u)) & 0xFFFFFFFu) << 1u;
+  uint micro = (((x & 7u) + ((y & 6u) << 2u)) << (log2_bytes + 6u)) >> 6u;
+  uint outer = ((y >> 3u) + (z >> 2u)) & 1u;
+  uint offset1 = outer + ((((x >> 3u) + (outer << 1u)) & 3u) << 1u);
+  uint offset2 = ((macro + (micro & ~15u)) << 1u) + (micro & 15u) + ((z & 3u) << (log2_bytes + 6u)) +
+                 ((y & 1u) << 4u);
+  uint address = (offset1 & 1u) << 3u;
+  address += (offset2 >> 6u) & 7u;
+  address <<= 3u;
+  address += offset1 & ~1u;
+  address <<= 2u;
+  address += offset2 & ~511u;
+  address <<= 3u;
+  address += offset2 & 63u;
+  return address;
+}
+
+// Inverse of TileDisplacement2D (sa2_native_draws.cpp) for 4-byte texels. The byte address holds:
+// [3:2] x & 3, [4] y & 1, [5] x bit 2, [7:6] (x >> 3) + 2 * (y bit 3), [10:8] (y >> 1) & 7, [11] y bit 4,
+// [12+] the 32x32 macro tile (row-major in tiles of the pitch). Checked against the forward function for pitches
+// 32 to 1280 (every texel round-trips).
+uvec2 Untiled2D(uint address, uint pitch) {
+  uint tiles_x = ((pitch + 31u) & ~31u) >> 5u;
+  uint macro = address >> 12u;
+  uint y = ((macro / tiles_x) << 5u) | (((address >> 11u) & 1u) << 4u) | (((address >> 8u) & 7u) << 1u) |
+           ((address >> 4u) & 1u);
+  uint y3 = (y >> 3u) & 1u;
+  uint x = ((macro % tiles_x) << 5u) | (((((address >> 6u) & 3u) - 2u * y3) & 3u) << 3u) |
+           (((address >> 5u) & 1u) << 2u) | ((address >> 2u) & 3u);
+  return uvec2(x, y);
+}
+
+void main() {
+  uvec3 q = gl_GlobalInvocationID;
+  if (any(greaterThanEqual(q, c.size3.xyz))) return;
+  uint address = TiledOffset3D(q.x, q.y, q.z, c.size3.w, c.size3.y);
+  uvec2 p = Untiled2D(address, c.source2.x);
+  vec4 value = vec4(0.0);
+  if (p.x < c.source2.y && p.y < c.source2.z) {
+    // Render resolution scaling: the resolve's host image may be larger than its guest size.
+    uvec2 h = (p * c.host2.xy) / c.source2.yz;
+    value = texelFetch(source, ivec2(min(h, c.host2.xy - 1u)), 0);
+  }
+  imageStore(target, ivec3(q), value);
+}

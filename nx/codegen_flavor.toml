@@ -1,0 +1,24 @@
+# Optimised codegen for MGSV: Ground Zeroes, step A (as in sa2-nx / sc5p2-nx's codegen_flavor.toml): the options that
+# need no per-function audit. Only how the C++ is written changes, so the compiler can keep guest state in host
+# registers; the guest-visible result is the same:
+#   - cr0-cr7, ctr, xer and the lwarx reservation as C++ locals; skip_msr (no mfmsr/mtmsrd fences or global lock
+#     around guest atomics); dform_disp_split; fctiwz_inline, fcti_inline, div_inline (host instructions instead of
+#     guarded C);
+#   - fp_moves_modeless, fp_compares_modeless, fp_mode_lookahead (+ past_branch off), fp_copy_pairs: far fewer host
+#     flush-mode (msr fpcr) switches, which are expensive on the Cortex-A57.
+# Not yet: non_volatile_as_local / non_argument_as_local (step B/C) - they need tools/read_before_write.py and
+# tools/non_argument_audit.py run on this game's code first (setjmp/longjmp, noreturn functions, EH funclets).
+cr_as_local = true
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+skip_msr = true
+dform_disp_split = true
+fctiwz_inline = true
+fp_moves_modeless = true
+fp_compares_modeless = true
+fp_mode_lookahead = true
+fp_mode_lookahead_past_branch = false
+fcti_inline = true
+fp_copy_pairs = true
+div_inline = true

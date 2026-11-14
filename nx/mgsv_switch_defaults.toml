@@ -1,0 +1,19 @@
+# MGSV: Ground Zeroes for the Switch: fixed settings compiled into the NRO, applied before the SD card's mgsv.toml
+# (which may override any key here for testing).
+#
+# Bring-up build (stage 1): the emulated Xenos GPU on NVK. Expect it to be slow; it proves memory, threads, files,
+# audio and input on the console before a native renderer is written.
+
+# Stage 2: the native renderer (src/me) instead of the emulated Xenos GPU. It reads the game's GPU commands and draws
+# them with the shader package (sa2_shaders.mesp next to the NRO, made from the game's own shaders). Set it to false in
+# mgsv.toml to fall back to the emulated GPU.
+sa2_renderer_native = true
+gpu_plugin = "xenos"
+
+# Logs go to logs/ next to the NRO; info level while bringing the game up.
+log_level = "info"
+log_to_file = true
+
+# Read the disc files straight from game_root/ (the single-file pack is a later optimisation).
+asset_pack = false
+asset_pack_build = false

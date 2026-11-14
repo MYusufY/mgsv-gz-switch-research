@@ -1,0 +1,4 @@
+# MGSV: Ground Zeroes (Switch) - your settings. This file is written next to mgsv_gz.nro the first time the game
+# starts and is never overwritten; edit it on the SD card. Any key of the built-in settings can be overridden here.
+
+# log_level = "debug"

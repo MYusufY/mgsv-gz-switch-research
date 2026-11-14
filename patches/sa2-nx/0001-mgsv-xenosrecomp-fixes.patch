@@ -1,0 +1,114 @@
+diff --git a/shaders/XenosRecomp/shader_common.h b/shaders/XenosRecomp/shader_common.h
+index 0857d6e..d77b143 100644
+--- a/shaders/XenosRecomp/shader_common.h
++++ b/shaders/XenosRecomp/shader_common.h
+@@ -67,7 +67,8 @@ struct PushConstants
+ // a component: v[B / 16][(B % 16) / 4], and asuint reads it without changing a bit.
+ struct MassEffectBlockVs { float4 v[256]; };
+ struct MassEffectBlockPs { float4 v[256]; };  // banjo-nx: 256 (Nuts & Bolts reads up to c255)
+-struct MassEffectSharedBlock { float4 v[35]; };  // banjo-nx: + bool constants, indexed fetch buffers, vertex index base
++struct MassEffectSharedBlock { float4 v[36]; };  // mgsv-nx: 36 (+ the pixel shader indexed fetch buffers)
++//  // banjo-nx: + bool constants, indexed fetch buffers, vertex index base
+ [[vk::binding(0, 4)]] ConstantBuffer<MassEffectBlockVs> g_UboVertex;
+ [[vk::binding(1, 4)]] ConstantBuffer<MassEffectBlockPs> g_UboPixel;
+ [[vk::binding(2, 4)]] ConstantBuffer<MassEffectSharedBlock> g_UboShared;
+@@ -108,10 +109,14 @@ struct MassEffectSharedBlock { float4 v[35]; };  // banjo-nx: + bool constants,
+ // Formats decode like the emulation's vertex fetch (graphics/pipeline/shader/spirv_translator_fetch.cpp).
+ uint banjoVfetchWord(uint K, int dword)
+ {
+-    const uint2 address = MASSEFFECT_UBO ? uint2(MASSEFFECT_SHARED_UINT(520 + K * 8), MASSEFFECT_SHARED_UINT(524 + K * 8))
+-                                         : vk::RawBufferLoad<uint2>(g_PushConstants.SharedConstants + 520 + K * 8, 8);
+-    const uint words = MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(536 + K * 4)
+-                                      : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536 + K * 4);
++    // mgsv-nx: K 2..3 are the pixel shader's buffers (Fox Engine pixel shaders vfetch from buffers): device address at
++    // bytes 548 + 8 (K - 2), size in words at 564 + 4 (K - 2).
++    const uint at = K < 2 ? 520 + K * 8 : 548 + (K - 2) * 8;
++    const uint at_words = K < 2 ? 536 + K * 4 : 564 + (K - 2) * 4;
++    const uint2 address = MASSEFFECT_UBO ? uint2(MASSEFFECT_SHARED_UINT(at), MASSEFFECT_SHARED_UINT(at + 4))
++                                         : vk::RawBufferLoad<uint2>(g_PushConstants.SharedConstants + at, 8);
++    const uint words = MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(at_words)
++                                      : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + at_words);
+     if (dword < 0 || uint(dword) >= words)
+         return 0;
+     return vk::RawBufferLoad<uint>(((uint64_t(address.y) << 32) | uint64_t(address.x)) + uint64_t(uint(dword)) * 4, 4);
+@@ -326,6 +331,17 @@ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, f
+     return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) + offset - 0.5));
+ }
+ 
++// MGSV: the translator emits every 2D fetch-family call with the slot's 1/size as the last argument (see
++// shader_recompiler.cpp, "the last argument is 1/size of the slot"); tfetch2D took it, getWeights2D did not, so every
++// shader with a getWeights2D (Fox Engine's shadow filtering) failed to compile. Same result as the overload above,
++// with the size taken from invSize (queried only when the slot gives none).
++float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 invSize)
++{
++    if (any(invSize == 0.0))
++        return getWeights2D(resourceDescriptorIndex, samplerDescriptorIndex, texCoord, offset);
++    return select(isnan(texCoord), 0.0, frac(texCoord / invSize + offset - 0.5));
++}
++
+ float w0(float a)
+ {
+     return (1.0f / 6.0f) * (a * (a * (-a + 3.0f) - 3.0f) + 1.0f);
+diff --git a/shaders/XenosRecomp/shader_recompiler.cpp b/shaders/XenosRecomp/shader_recompiler.cpp
+index 0bc52b4..d4c0233 100644
+--- a/shaders/XenosRecomp/shader_recompiler.cpp
++++ b/shaders/XenosRecomp/shader_recompiler.cpp
+@@ -2021,6 +2021,43 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             print(",\n\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
+     }
+ 
++    // mgsv-nx: vertex fetches of a game shader that the vertex declaration does not cover read a buffer by a computed
++    // index (Fox Engine: pixel shaders and vertex shaders reading instance/light data). They go through banjoVfetch
++    // like the register-linked indexed fetches: at most 2 fetch constants per stage, buffers 0..1 for the vertex
++    // shader and 2..3 for the pixel shader (the renderer passes them; sa2_native_shaders.cpp computes the same list).
++    if (!linkByRegister)
++    {
++        const auto* words = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + shader->physicalOffset);
++        std::vector<uint32_t> microcode(shader->size / 4);
++        for (size_t i = 0; i < microcode.size(); i++)
++            microcode[i] = words[i];
++        std::vector<uint32_t> constants;
++        bool lastUndeclared = false;
++        uint32_t lastBuffer = 0;
++        for (auto& [index, reg] : vertexFetchesByRegister(microcode))
++        {
++            const uint32_t d0 = microcode[index * 3], d1 = microcode[index * 3 + 1];
++            if (!((d1 >> 30) & 0x1))
++            {
++                lastUndeclared = vertexElements.find(index) == vertexElements.end();
++                if (lastUndeclared)
++                {
++                    const uint32_t constant = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 0x3);
++                    auto it = std::find(constants.begin(), constants.end(), constant);
++                    lastBuffer = uint32_t(it - constants.begin());
++                    if (it == constants.end())
++                    {
++                        if (constants.size() >= 2)
++                            throw std::runtime_error("more than 2 buffer vertex fetch constants");
++                        constants.push_back(constant);
++                    }
++                }
++            }
++            if (lastUndeclared && vertexElements.find(index) == vertexElements.end())
++                indexedFetches.emplace(index, (isPixelShader ? 2u : 0u) + lastBuffer);
++        }
++    }
++
+     out += ")\n";
+     out += "{\n";
+ 
+@@ -2172,7 +2209,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             // Direct3D's own Clear pixel shader (ps_ba62fb45, oC0 = r0) got an empty list, so r0 became the pixel
+             // position and every clear wrote (x, y, 0, 0) instead of the clear colour. A shader that declares no
+             // interpolator therefore reads them all; shaders that declare some keep their layout.
+-            if (isPixelShader && interpolatorsByRegister && interpolatorCount == 0 && i < 16)
++            // mgsv-nx: except the container's vPos register (fieldC bit 1 set, register in bits 8-15): the hardware
++            // loads it with the pixel position (param gen), not an interpolator. Fox Engine's fullscreen passes pair
++            // Direct3D's position-only screen quad VS with a PS that reads its position from r0 (abs(r0.xy) + tiling);
++            // reading iTexCoord0 there gave 0, so every such pass sampled texel (0, 0) - its depth restore wrote the
++            // far plane everywhere and no stencil light volume ever marked a pixel (all deferred lighting black).
++            if (isPixelShader && interpolatorsByRegister && interpolatorCount == 0 && i < 16 &&
++                !((shader->fieldC & 0x2) && i == ((shader->fieldC >> 8) & 0xFF)))
+             {
+                 out += fmt::format("iTexCoord{};\n", i);
+             }

@@ -1,0 +1,15 @@
+# ReXGlue recompilation manifest for Metal Gear Solid V: Ground Zeroes (Xbox 360, title 4B4E085C).
+# default.xex: image base 0x82000000, entry point 0x82E12CC0. Used with the sa2-nx SDK fork
+# (third_party/sa2-nx/sdk, ReXGlue 0.10 + Horizon layer) for both the macOS test build and the Switch NRO.
+
+[project]
+name = "mgsv_gz"
+sdk_version = "0.10.0"
+# Your own game files (extracted disc). Never committed or distributed.
+game_root = "../extracted"
+
+[entrypoint]
+file_path = "../extracted/default.xex"
+out_directory_path = "generated/default"
+# Function boundaries the analysis misses (carried over from port/overrides.toml).
+includes = ["overrides.toml", "codegen_flavor.toml"]
