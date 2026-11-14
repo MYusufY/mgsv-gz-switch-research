@@ -1,5 +1,7 @@
 # MGSV: Ground Zeroes NX
 
+![MGSV: Ground Zeroes NX Title Image](https://raw.githubusercontent.com/MYusufY/mgsv-gz-switch-research/images/title.png)
+
 Running the Xbox 360 version of Metal Gear Solid V: Ground Zeroes natively on the Nintendo Switch, through static recompilation.
 
 > **Status: archived research project.** It boots, plays audio, takes input and renders lit 3D scenes, but it is **not playable** (around 2 fps on the console, with lots of rendering glitches).
@@ -86,7 +88,7 @@ Every bug that made the native renderer draw black or wrong images, with its roo
 - [port/](port) -> the earlier macOS-only build on the emulated GPU, and the SDK patch it needs
 - [patches/sa2-nx/](patches/sa2-nx) -> my fixes to sa2-nx's shader translator (apply on `BASE_COMMIT`) and the macOS shader library build script
 - [tools/](tools) -> XEX inspection & extraction helpers (the retail XEX key is **not** included, set `XEX_RETAIL_KEY` yourself)
-- [docs/](docs) -> findings, plus notes from earlier rounds
+- [docs/](docs) -> findings, plus the original porting assessment
 
 # Building
 
